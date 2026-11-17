@@ -1,0 +1,7 @@
+.env
+.venv/
+cache/
+kb/
+manual_sources/
+vector_store/
+__pycache__/
