@@ -16,8 +16,8 @@ def llm(system, user):
     return r.text
 
 def answer(tenant_id, question):
-    hits = (rag.search(tenant_id, question, tier="concept")
-            or rag.search(tenant_id, question, tier="raw"))
+    hits = (rag.search(tenant_id, question, top_k=5, tier="concept")
+            or rag.search(tenant_id, question, top_k=5, tier="raw"))
     context = "\n\n".join(h["text"] for h in hits) or "(nothing relevant found)"
     system = "Answer using only the context. If it has no answer, say you don't know."
     user = f"<context>\n{context}\n</context>\n\nQuestion: {question}"

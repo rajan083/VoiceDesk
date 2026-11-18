@@ -5,14 +5,15 @@ import numpy as np, yaml, chromadb
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 KB_DIR = os.path.join(BASE_DIR, "kb")                    # kb/<tenant_id>/**/*.md
 STORE_DIR = os.path.join(BASE_DIR, "vector_store")
-EMBEDDING_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"   # swap after your bake-off
-INGEST_VERSION = "v1"        # bump when chunking changes -> everything re-ingests
+EMBEDDING_MODEL = "all-MiniLM-L6-v2"   # swap after your bake-off
+INGEST_VERSION = "v4"        # bump when chunking changes -> everything re-ingests
 
 BREAKPOINT_PERCENTILE = 90   # higher = fewer, larger chunks
-MAX_CHUNK_WORDS = 90         # must fit the embedder's token limit
+MAX_CHUNK_TOKENS = 180       # model limit 128 minus ~25 for the "title: " prefix and special tokens
+
 MIN_CHUNK_SENTENCES = 2
-MIN_CHUNK_WORDS = 12
-MIN_SCORE = 0.35             # placeholder: measure it
+MIN_CHUNK_WORDS = 15
+MIN_SCORE = 0.20             # placeholder: measure it
 CACHE_MAX = 500
 SKIP_FILES = {"index.md", "log.md", "changelog.md"}
 
@@ -38,29 +39,48 @@ def split_sentences(text):
     text = re.sub(r"\s+", " ", text).strip()
     return [s.strip() for s in _SENT_RE.split(text) if s.strip()] if text else []
 
-def _hard_split(sentence, max_words):            # only for one giant sentence
-    w = sentence.split()
-    return [" ".join(w[i:i + max_words]) for i in range(0, len(w), max_words)]
+def _tok():
+    return _model().tokenizer
+
+def _token_counts(texts):
+    return [len(ids) for ids in _tok()(texts, add_special_tokens=False)["input_ids"]]
+
+def ntokens(text):
+    return _token_counts([text])[0]
+
+def _fit(sentence, n_tok):
+    if n_tok <= MAX_CHUNK_TOKENS:
+        return [sentence]
+    words = sentence.split()
+    wt = _token_counts(words)
+    pieces, cur, t = [], [], 0
+    for w, n in zip(words, wt):
+        if cur and t + n > MAX_CHUNK_TOKENS:
+            pieces.append(" ".join(cur)); cur, t = [], 0
+        cur.append(w); t += n
+    if cur:
+        pieces.append(" ".join(cur))
+    return pieces
 
 def semantic_chunks(text, model):
     sents = split_sentences(text)
+    tcount = _token_counts(sents) if sents else []
     if len(sents) <= MIN_CHUNK_SENTENCES:
-        return [t for s in sents for t in _hard_split(s, MAX_CHUNK_WORDS)]
+        return [p for s, n in zip(sents, tcount) for p in _fit(s, n)]
     vecs = np.asarray(model.encode(sents, normalize_embeddings=True))
-    dists = 1 - (vecs[:-1] * vecs[1:]).sum(axis=1)             # topic distance between neighbours
+    dists = 1 - (vecs[:-1] * vecs[1:]).sum(axis=1)
     cutoff = np.percentile(dists, BREAKPOINT_PERCENTILE)
-    chunks, cur, words = [], [], 0
+    chunks, cur, toks = [], [], 0
     def flush():
-        nonlocal cur, words
+        nonlocal cur, toks
         if cur: chunks.append(" ".join(cur))
-        cur, words = [], 0
-    for i, s in enumerate(sents):
-        w = len(s.split())
-        if w > MAX_CHUNK_WORDS:
-            flush(); chunks.extend(_hard_split(s, MAX_CHUNK_WORDS)); continue
-        if cur and words + w > MAX_CHUNK_WORDS:                # cap at a sentence boundary
+        cur, toks = [], 0
+    for i, (s, n) in enumerate(zip(sents, tcount)):
+        if n > MAX_CHUNK_TOKENS:
+            flush(); chunks.extend(_fit(s, n)); continue
+        if cur and toks + n > MAX_CHUNK_TOKENS:
             flush()
-        cur.append(s); words += w
+        cur.append(s); toks += n
         if i < len(dists) and dists[i] > cutoff and len(cur) >= MIN_CHUNK_SENTENCES:
             flush()
     flush()
@@ -69,17 +89,26 @@ def semantic_chunks(text, model):
 def merge_tiny(chunks):
     out = []
     for c in chunks:
-        if out and len(c.split()) < MIN_CHUNK_WORDS:
+        if out and len(c.split()) < MIN_CHUNK_WORDS and ntokens(out[-1] + " " + c) <= MAX_CHUNK_TOKENS:
             out[-1] += " " + c
         else:
             out.append(c)
-    if len(out) > 1 and len(out[0].split()) < MIN_CHUNK_WORDS:
+    if (len(out) > 1 and len(out[0].split()) < MIN_CHUNK_WORDS
+            and ntokens(out[0] + " " + out[1]) <= MAX_CHUNK_TOKENS):
         out[1] = out[0] + " " + out[1]; out = out[1:]
     return out
 
 def chunk_body(body, model):
     body = body.strip()
-    if len(body.split()) <= MAX_CHUNK_WORDS:          # an OKF concept stays whole
+    if not body:
+        return []
+    if ntokens(body) <= MAX_CHUNK_TOKENS:             # an OKF concept stays whole
+        return [body]
+    return merge_tiny(semantic_chunks(body, model))
+
+def chunk_body(body, model):
+    body = body.strip()
+    if len(body.split()) <= MAX_CHUNK_TOKENS:          # an OKF concept stays whole
         return [body] if body else []
     return merge_tiny(semantic_chunks(body, model))
 
@@ -118,6 +147,18 @@ def _iter_files(root):
                 found[os.path.relpath(p, root).replace(os.sep, "/")] = p
     return found
 
+_EMPTY_FIELD = re.compile(r"[\w ./()\-]{1,40}:\s*;\s*")
+_LEADER = re.compile(r"[.·_=\-–—*]{4,}")
+_LONG_RUN = re.compile(r"(\S{60})\S+")
+
+def is_toc(text):
+    return len(re.findall(r"\.{4,}", text)) >= 5
+
+def clean_body(body):
+    body = _LEADER.sub(" ", body)
+    body = _EMPTY_FIELD.sub(" ", body)
+    body = _LONG_RUN.sub(r"\1", body)
+    return re.sub(r"[ \t]+", " ", body)
 
 def ingest_tenant(tenant_id, only_verified=True):
     root = os.path.join(KB_DIR, str(tenant_id))
@@ -130,13 +171,18 @@ def ingest_tenant(tenant_id, only_verified=True):
     for gone in set(manifest) - set(files):                   # file deleted from disk
         col.delete(where={"source": gone}); del manifest[gone]
 
-    done = skipped = n_chunks = held_back = 0
+    done = skipped = n_chunks = held_back = toc_skipped = 0
+    toc_files = []
     for rel, path in files.items():
         h = _file_hash(path, salt)
         if manifest.get(rel) == h:
             skipped += 1; continue
         col.delete(where={"source": rel})
         meta, body = parse_okf(open(path, encoding="utf-8").read())
+        if meta.get("type") == "manual_page":
+            if is_toc(body):                         # check BEFORE cleaning
+                toc_skipped += 1; manifest[rel] = h; continue
+            body = clean_body(body)
         if only_verified and meta.get("verified") is not True:   # unreviewed stays out
             held_back += 1; manifest[rel] = h; continue
         title = str(meta.get("title", rel))
@@ -153,7 +199,7 @@ def ingest_tenant(tenant_id, only_verified=True):
         manifest[rel] = h; done += 1
     _save_manifest(tenant_id, manifest)
     clear_cache(tenant_id)
-    return {"ingested": done, "chunks": n_chunks, "skipped": skipped, "held_back": held_back}
+    return {"ingested": done, "chunks": n_chunks, "skipped": skipped, "held_back": held_back, "toc_skipped": toc_skipped, "toc_files": toc_files}
 
 
 def clear_cache(tenant_id=None):
