@@ -15,7 +15,7 @@ vector_store/*
 !vector_store/.gitkeep
 tenants/*
 !tenants/.gitkeep
-calls
+calls/*
 !calls/.gitkeep
 
 
