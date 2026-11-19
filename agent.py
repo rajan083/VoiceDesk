@@ -6,6 +6,7 @@ import rag_pipeline as rag
 import tenant_config as tc
 from tts import tts_llm
 from stt import stt_llm
+from session import Session
 
 load_dotenv()
 client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
@@ -77,10 +78,11 @@ if __name__ == "__main__":
     
     if len(sys.argv) != 2:
         sys.exit('usage: python agent.py <tenant id | phone number | business name>')
+        
     TENANT_ID = resolve_tenant(sys.argv[1])
-    
     if not TENANT_ID:
         sys.exit(f"no tenant matches {sys.argv[1]!r}")
+        
     cfg = tc.load_tenant(TENANT_ID)
     log.info("resolved %r -> %s", sys.argv[1], TENANT_ID)
     print(cfg["greeting"].format(business_name=cfg["business_name"]))
@@ -91,9 +93,14 @@ if __name__ == "__main__":
     if "error" in result:
         sys.exit(1)
     print("\nType exit/quit to exit.\n")
+    session= Session(TENANT_ID, client, MODEL)
     while True:
         q = input("You: ").strip()
         if q.lower() in ("exit", "quit"):
+            try:
+                print(session.close() or "")
+            except Exception:
+                log.exception("summary failed")
             break
         if not q:
             continue
@@ -103,6 +110,6 @@ if __name__ == "__main__":
             print("Sources:", ", ".join(sorted({h["source"] for h in hits})) or "none", "\n")
             os.startfile("reply.wav")
             continue
-        reply, hits = answer(TENANT_ID, q)
+        reply, hits = session.turn(q) 
         print(f"Response: {reply}")
         log.info("Sources: %s", ", ".join(sorted({h["source"] for h in hits})) or "none")

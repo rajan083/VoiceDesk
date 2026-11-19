@@ -4,6 +4,7 @@ __pycache__/
 cache/
 *.log
 *.wav
+*.db
 
 models/
 kb/*
@@ -14,5 +15,7 @@ vector_store/*
 !vector_store/.gitkeep
 tenants/*
 !tenants/.gitkeep
+calls
+!calls/.gitkeep
 
 
