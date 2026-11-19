@@ -1,85 +1,79 @@
 # VoiceDesk
 
-An AI phone receptionist for small businesses, built from scratch on hosted model APIs (no voice platform). It answers a business's calls from that business's own manual (RAG), and is designed to book appointments, collect caller details and notify the owner. Each business is a separate tenant with its own knowledge base.
+An AI phone receptionist for small businesses, built from scratch on hosted Gemini APIs (no voice platform).
+It answers questions from a business's own manual (RAG), books appointments, passes messages to the owner
+and keeps a log and summary of every call. Each business is a separate **tenant** with its own phone number,
+settings, knowledge base and bookings.
 
-> **Status: early development.** The knowledge pipeline, per-tenant config, a text agent and a file-based voice loop (WAV in, WAV out) work. Tools, live voice, portal and telephony are planned. Every section is marked `[built]`, `[partial]` or `[planned]`. Update the markers as the project changes, and don't describe a planned part as working.
+> **Status: working terminal prototype.** The knowledge pipeline, the multi-tenant setup, the text agent with
+> tools, call logs and file-based speech (speech-to-text and text-to-speech) work. Live microphone streaming,
+> telephony and a portal are not built. Each section is marked `[built]`, `[partial]` or `[planned]`.
+> Update the markers as the project changes, and don't describe a planned part as working.
 
 ## Status
 
-| Piece | State | Notes (as of 2026-11-19) |
+| Piece | State | Notes |
 |---|---|---|
-| PDF to page files (`manual_pages.py`) | [built] | Vision transcription in 4-page slices, resumable cache |
-| Clean, chunk, embed, store (`ingest_tenant`) | [built] | Demo tenant: 114 files, 183 chunks, 3 TOC pages skipped |
-| Search (tier filter + `min_score`) | [partial] | Threshold is a placeholder, not yet measured |
-| Tenant config (`tenant_config.py`) | [built] | Per-tenant JSON: business name, greeting, retrieval settings, dialed-number lookup |
-| Text agent (`agent.py`) | [partial] | Resolves tenant by id, number or business name; spoken-style prompt only in voice mode |
-| Voice loop, file based (`stt.py`, `tts.py`, `voice_answer`) | [partial] | WAV in, WAV out, per-stage timings logged. Tested on synthesized (TTS) audio only |
-| Review gate (`verified: true`) | [partial] | Implemented, currently bypassed with `only_verified=False` |
-| Concept (OKF) tier | [planned] | 0 concept chunks today |
-| Evaluation set and scripts | [planned] | Candidate generator exists; no results yet |
-| Tool Gateway, bookings, leads, owner alerts | [planned] | |
-| Live voice (realtime model, barge-in, limits) | [planned] | |
-| Thin portal and API | [planned] | |
+| Tenants: create, look up by number or name (`tenant_config.py`) | [built] | Config per tenant, E.164 numbers, no default tenant |
+| Document flow: add, review, verify, ingest, remove (`tenant_docs.py`) | [built] | CLI, resumable transcription |
+| PDF to page files (`manual_qa.py`) | [built] | Gemini vision in 4-page slices, cached |
+| Clean, chunk, embed, search (`rag_pipeline.py`) | [built] | One Chroma collection per tenant |
+| Text agent with tools (`agent.py`, `session.py`) | [built] | Gemini chat with function calling |
+| Appointments and notes (`bookings.py`) | [built] | Booking tools are exposed only when a tenant has a `scheduling` block |
+| Call log and summary (`calllog.py`) | [built] | One log per call, summary written at hangup |
+| Call report (`report.py`) | [built] | Reads the call summaries |
+| Speech in/out (`stt.py`, `tts.py`) | [partial] | Works on `.wav` files, one request at a time, not streaming |
+| Voice path with tools and call log | [planned] | The `.wav` path in `agent.py` currently skips `Session` |
+| Retrieval tuning and evaluation set | [planned] | `min_score` is still a default, not measured |
+| Review gate (`verified: true`) | [partial] | Implemented, but `agent.py` ingests with `only_verified=False` |
+| Owner alerts and call transfer | [planned] | Config fields exist, no sender yet |
+| Live microphone, streaming, barge-in | [planned] | |
 | Telephony (softphone, then a real number) | [planned] | |
+| Portal and API | [planned] | |
 
 ## How it works
 
 ```
 OFFLINE: build one tenant's knowledge
- PDF -> manual_pages.py -> kb/<tenant>/raw/*.md -> spot-check -> ingest_tenant -> Chroma collection tenant_<id>
-        (4-page slices,     (verified: false)      (verified: true)  (clean, skip TOC,
-         cache, retry)                                                chunk, embed)
-        concept builder -> kb/<tenant>/concepts/*.md -> review -> ingest          [planned]
+ PDF -> tenant_docs.py add -> kb/<tenant>/raw/*.md -> check against the PDF -> verify -> ingest
+        (manual_qa.py:        (verified: false)                                          (clean, chunk,
+         4-page slices,                                                                   embed, store in
+         cache, retry)                                                                    tenant_<id> collection)
 
-TODAY: one turn, from a file
- question.wav -> stt_llm -> answer() -> tts_llm -> reply.wav
-                  |           |- tenant config (min_score, top_k)
-                  |           |- search: concepts first, raw fallback
-                  |           `- Gemini answers from the retrieved context only
-                  `- stt_ms / answer_ms / tts_ms written to the log
-
-TARGET: one call
- caller -> transport -> tenant lookup -> session worker -> realtime model -> spoken reply
- (browser mic /          (dialed number     |  ^
-  softphone / DID)        -> tenant_id)     v  | tool results
-                              Tool Gateway (server injects tenant_id; the model never sees it)
-                               |- search_knowledge: concepts first, raw fallback, min_score
-                               |- check_availability, book_appointment, save_lead
-                               `- notify_owner (Telegram), transfer_to_owner
- after hangup -> transcript, summary, usage, owner alert (async, off the audio path)
+ONLINE: one conversation
+ caller (typed text or .wav file)
+   -> stt.py (if audio) -> tenant resolved by the server (id / dialed number / business name)
+   -> Session (one per call): retrieve chunks for the question -> Gemini chat + tools -> reply
+         tools:  save_note                              (always)
+                 check_availability, book_appointment   (only if the tenant has a scheduling block)
+   -> tts.py (if audio) -> reply.wav
+ on exit -> calls/<tenant>/ log + summary -> report.py
 ```
 
 ## Project structure
 
-**Today**
 ```
 VoiceDesk/
-  .env                 GEMINI_API_KEY (never commit)
-  agent.py             llm(), answer(), voice_answer(), tenant resolution, chat loop
-  rag_pipeline.py      chunking, ingest_tenant(), search()
-  tenant_config.py     per-tenant config loader and dialed-number lookup
-  stt.py               speech to text (stt_llm)
-  tts.py               text to speech (tts_llm)
-  manual_pages.py      PDF -> vision transcription -> kb/<tenant>/raw/*.md
-  gen_eval.py          eval question generator (throttled, resumable)
-  requirements.txt     pinned dependencies
-  manual_sources/      source PDFs (not committed)
-  kb/<tenant>/raw/     transcribed pages (not committed; verified: false until reviewed)
-  cache/               vision results, so reruns cost nothing (not committed)
-  vector_store/        Chroma data + manifest_<tenant>.json (not committed)
-  voicedesk.log        run log, contains caller words (not committed)
+  agent.py              entry point: resolves the tenant, indexes new pages, chat loop, .wav input
+  session.py            one Session per call: prompt, tools, retrieval per turn, call log, summary at close
+  bookings.py           availability, booking and notes storage used by the tools
+  calllog.py            per-call log and summary
+  report.py             builds a report from the call summaries
+  rag_pipeline.py       chunking, embedding, ChromaDB ingest and search (one collection per tenant)
+  manual_qa.py          PDF to page files with Gemini vision (resumable, cached)
+  tenant_config.py      create tenants, load config, dialed number / name to tenant
+  tenant_docs.py        per-tenant document commands: add, status, verify, ingest, remove
+  stt.py                speech-to-text for a .wav file
+  tts.py                text-to-speech to a .wav file
+  requirements.txt
+  tenants/<id>/         config.json per tenant               (data, not committed)
+  manual_sources/<id>/  source PDFs                          (data, not committed)
+  kb/<id>/raw/          transcribed pages, one .md per page  (data, not committed)
+  vector_store/         ChromaDB data and ingest manifests   (data, not committed)
+  calls/<id>/           call logs and summaries              (data, not committed)
 ```
 
-**Target** (grow into this phase by phase; restructure only when a second module needs to import the first)
-```
-voicedesk/
-  rag/      chunking, ingest, search, manual_pages, concept builder
-  agent/    text_agent, tool_gateway, session worker, providers/ (gemini_live, openai_realtime)
-  tools/    availability, booking, leads, notify
-  core/     tenant config loader, prompt composer, limits, CallTransport
-  evals/    cases.jsonl, run_eval.py, injection_suite.py, results/
-  api/ web/ telephony/
-```
+The data folders are in the repo only as empty placeholders (`.gitkeep`).
 
 ## Setup (Windows PowerShell)
 
@@ -89,107 +83,163 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-`google-genai` is pinned in `requirements.txt` because the TTS and STT calls were verified on that version only. Newer or older versions may reject the same requests.
+Create a `.env` file:
 
-Create `.env`:
 ```
-GEMINI_API_KEY=your-key
+GEMINI_API_KEY=your-key-here
 ```
 
-Build and query the demo tenant:
+`.env`, the log files and the data folders must stay out of git. Never commit the API key.
+The first run downloads the embedding model.
+
+## Usage
+
+Anywhere a command takes `<tenant>`, you can give the tenant ID, an assigned phone number or the exact
+business name. Quote values that contain spaces or a `+`.
+
+**1. Create a tenant**
+
 ```powershell
-# 1. put the PDF in manual_sources/
-python manual_pages.py demo                  # transcribe pages to kb/demo/raw/ (cached, resumable)
-# 2. open the riskiest pages next to the PDF, fix errors, set verified: true
-python agent.py demo                         # tenant id, dialed number or business name
+python tenant_config.py new "Plumbing Agency" --number +14155550100
+python tenant_config.py list
+python tenant_config.py check
 ```
 
-At the `You:` prompt, type a question for a text answer, or type the path of a `.wav` file for a voice turn. The voice turn prints what was heard, plays `reply.wav` and logs the stage timings. Playback uses `os.startfile`, so it works on Windows only.
+IDs are generated (`t_` plus 12 hex characters). Use `--id demo` only for a fixed name.
 
-Notes:
-- The first run downloads the embedding model.
-- The free Gemini tier allows about 15 requests per minute per model. `gen_eval.py` throttles itself and resumes from `eval_candidates.jsonl`.
-- Python 3.13 removed `audioop`. The telephony audio helpers will need `pip install audioop-lts`.
+**2. Add and review a document**
+
+```powershell
+python tenant_docs.py add <tenant> guide.pdf
+python tenant_docs.py status <tenant>
+python tenant_docs.py verify <tenant> <doc> --pages 1-20,25      # or --all
+python tenant_docs.py ingest <tenant>
+```
+
+`<doc>` is the name shown by `status` (the PDF name in lowercase with underscores). Only verified pages are
+indexed. `ingest --include-unverified` is for development only. To remove a document, run
+`python tenant_docs.py remove <tenant> <doc> --yes` and then `ingest` again.
+
+**3. Talk to the agent**
+
+```powershell
+python agent.py "Plumbing Agency"
+```
+
+The agent plays the tenant's greeting, indexes any new pages, then answers until you type `exit` or `quit`.
+On exit it prints the call summary.
+
+**4. Try the voice path**
+
+```powershell
+python tts.py                       # type a question, creates speech.wav
+python agent.py "Plumbing Agency"
+You: speech.wav                     # type the file name without quotes
+```
+
+The agent prints what it heard and its reply, and plays `reply.wav`. Timings for each step (speech-to-text,
+answer, text-to-speech) go to `voicedesk.log`.
+
+## Tenant configuration
+
+`tenants/<id>/config.json` is merged over these defaults:
+
+```json
+{
+  "language": "en",
+  "greeting": "Thank you for calling {business_name}. How can I help?",
+  "phone_numbers": [],
+  "owner": {"notify_telegram_chat_id": null, "transfer_number": null},
+  "retrieval": {"top_k": 5, "min_score": 0.20}
+}
+```
+
+- Phone numbers must be in +E.164 form, and one number can belong to only one tenant.
+- Add a `scheduling` block (it includes the tenant's `timezone`; see `bookings.py` for the other fields) to
+  switch on `check_availability` and `book_appointment` for that tenant.
+- Tune `top_k` and `min_score` per tenant against its own test questions.
 
 ## Knowledge pipeline
 
-- **Transcription** [built]: 4-page PDF slices go to a Gemini vision model. Refusal-like replies are retried once, then left for the next run. The cache key is file hash + prompt version + model, and it is saved after every call.
-- **Cleaning at ingest** [built]: dot leaders, empty `Field: ;` table cells and unbreakable long runs are removed. Pages with five or more dot-leader runs are treated as tables of contents and skipped.
-- **Chunking** [built]: a body within `MAX_CHUNK_TOKENS` stays whole. Longer bodies are split into sentences (handles `.`, `!`, `?`, `।`, `॥` and bullet markers), cut at semantic breakpoints (percentile of neighbour distance), and capped by the embedder's own tokenizer. Tiny fragments are merged only if the result stays under the cap.
-- **Embedding and storage** [built]: title-prefixed text, cosine distance, one Chroma collection per tenant, a manifest per tenant for incremental re-ingest.
-- **Review gate** [partial]: with `only_verified=True`, only files with `verified: true` are indexed.
-- **Tiers** [partial]: `raw` (transcribed pages) and `concept` (reviewed OKF concept files). Search tries concepts first and falls back to raw below the threshold.
+- **Transcription** [built]: 4-page PDF slices go to a Gemini vision model. Refusal-like replies are retried
+  once, then left for the next run. Results are cached by file hash, prompt version and model.
+- **Cleaning** [built]: dot leaders, empty table cells and very long unbroken runs are removed, and pages that
+  look like a table of contents are skipped.
+- **Chunking** [built]: a short page stays whole. Longer pages are split into sentences, cut at semantic
+  breakpoints and capped by the embedding model's own tokenizer. Tiny fragments are merged back.
+- **Storage** [built]: title-prefixed text, cosine distance, one Chroma collection per tenant, and a manifest per
+  tenant so unchanged files are skipped on the next ingest.
+- **Search** [built]: chunks are tiered as `raw` (transcribed pages) or `concept` (reviewed summary files).
+  Search tries `concept` first and falls back to `raw`, and drops results below `min_score`.
 
 | Setting | Where | What it does |
 |---|---|---|
 | `INGEST_VERSION` | `rag_pipeline.py` | Bump after any chunking or cleaning change, and everything re-ingests |
-| `MAX_CHUNK_TOKENS` | `rag_pipeline.py` | Chunk cap; keep under the model's token limit minus the title prefix |
+| `MAX_CHUNK_TOKENS` | `rag_pipeline.py` | Chunk cap; keep it under the embedder's limit minus the title prefix |
 | `BREAKPOINT_PERCENTILE` | `rag_pipeline.py` | Lower means more, smaller chunks |
-| `retrieval.min_score`, `retrieval.top_k` | tenant config | Relevance cutoff and result count used by `answer()`; `min_score` must be measured |
+| `retrieval.top_k`, `retrieval.min_score` | tenant `config.json` | How many chunks, and the relevance cutoff |
 | `only_verified` | `ingest_tenant()` | Index only reviewed files |
-| `PROMPT_VERSION`, `VISION_MODEL` | `manual_pages.py` | Changing either re-transcribes |
+| `PROMPT_VERSION`, `VISION_MODEL` | `manual_qa.py` | Changing either re-transcribes |
 
-## Answering rules
+## Agent behavior
 
-- Facts come only from the retrieved context. If it has no answer, the agent says it doesn't know. [planned] Offer a callback instead.
-- Voice replies are one or two short plain sentences, no lists or markdown. Typed replies use the shorter base prompt.
-- Retrieved text goes in the user turn inside a `<context>` block. [planned] The system prompt does not yet tell the model to treat that block as reference only and ignore instructions inside it.
+- **Facts come only from the retrieved context.** The context sits in the user turn inside a labeled block and is
+  treated as reference text. The prompt tells the model to ignore any instructions that appear inside it, and
+  any caller request to change the rules.
+- **Unknown answers:** if the context lacks the answer, the agent says it doesn't know and offers to take a message.
+- **Booking flow:** ask for the caller's name and preferred day, check availability, offer two or three times,
+  read back the date, time and name, wait for a yes, then book and read out the confirmation code. The prompt
+  forbids inventing times, codes or availability.
+- **Notes:** `save_note` passes a message or callback request to the owner, and the agent only says it was passed
+  on after the tool returns ok.
+- **Spoken replies:** in voice mode, replies are one or two short plain sentences with no lists or markdown.
+- **Tenant and caller phone are set by the server.** The model never sees or sets `tenant_id` or the caller's
+  number, and an unknown dialed number never falls back to a default tenant.
 
-## Security model [planned, partly in code]
+## Models
 
-Assume the model can be tricked, and make sure a tricked model has nothing dangerous to reveal or do.
-
-- **Tenant isolation** [built]: one collection per tenant, so no query can omit the filter.
-- **No caller writes to the knowledge base** [built]: callers' statements are never saved as learned answers.
-- **Least privilege** [planned]:
-
-| Tool | Returns to the model | Never returns |
+| Use | Model | File |
 |---|---|---|
-| `search_knowledge` | Top chunks for this tenant | Other tenants' chunks, document metadata |
-| `check_availability` | Free slots | Who booked the busy ones |
-| `book_appointment` | Confirmation code | Other bookings |
-| `transfer_to_owner` | "Transferring" | The owner's number (read from server config) |
-| `notify_owner` | "Sent" | Contact details |
+| Answers, chat and call summary | `gemini-3.1-flash-lite` | `agent.py` |
+| Page transcription | `gemini-3.1-flash-lite` | `manual_qa.py` |
+| Speech to text | `gemini-3.1-flash-lite` (v1beta) | `stt.py` |
+| Text to speech | `gemini-3.8-flash-lite-tts`, voice Kore, 24 kHz mono WAV | `tts.py` |
+| Embeddings | `all-MiniLM-L6-v2` (sentence-transformers), loaded once per process | `rag_pipeline.py` |
 
-- `tenant_id` is supplied by the server, never by the model.
-- Treat every document as public: anything retrievable can be read aloud to any caller.
-- An injection test suite (caller attacks and poisoned documents) runs after every prompt change. [planned]
-
-## Evaluation [planned]
-
-- **Retrieval:** hit rate at k=3 on 30 or more spoken-style questions, a few of them about tables and mid-procedure steps, plus about 10 unanswerable ones. Choose `min_score` from the gap between answerable and unanswerable top scores.
-- **Hand-written and generated questions are reported separately.** Generated questions reuse the chunk's wording and inflate the hit rate.
-- **Voice:** compare typed, recorded-voice and phone-quality (8 kHz mu-law) versions of the same questions: heard text, top score, right page in top 3. Also time to first audio, interruption handling, cost per call. The file loop already logs `stt_ms`, `answer_ms` and `tts_ms`; `tts_ms` is full synthesis time, not time to first audio.
-- **Safety:** injection suite, with a leaked/complied flag per case.
-- **Known test cases from the demo manual:** duplicated sections (16.x and 21.x, and 12 and 14), and a contradiction in the source (the Equipment option descriptions are reversed). The right behavior for a contradiction is "I'm not sure".
-
-## Roadmap
-
-| # | Build | Done when |
-|---|---|---|
-| 1b | Eval set, `min_score` from evidence, spot-check risky pages, `only_verified=True` | A stated hit@3 and threshold |
-| 1c | Embedding bake-off at a fixed chunk cap | A table of hit rates |
-| 2 | Prompt composer, Tool Gateway, bookings, leads, Telegram notify, injection suite | Injection suite runs with 0 leaks |
-| 3 | Voice gate (record 30 questions, spike, pass criteria), then provider adapter, `CallTransport`, barge-in, limits | Pass criteria met; latency measured |
-| 4 | Thin portal on FastAPI: profile, document upload with status, test call, call list | A tenant onboards without editing files |
-| 5 | Local Asterisk + softphone, extension-to-tenant lookup, then one real number | One recorded forwarded call |
-| 6 | Hardening and write-up: optional Postgres/pgvector with row-level security, spend caps, results report | Report with retrieval, latency, cost and injection numbers |
+Model names change often, so check them against your account's current model list.
 
 ## Known issues
 
-- `min_score` is a guess. Measure it before trusting "I don't know" behavior.
-- The voice loop has been tested on synthesized audio only. Real voices, 8 kHz phone audio and Hindi or Punjabi are untested, and a general model used as speech to text can answer a question instead of transcribing it, so check the `Heard:` line.
-- `only_verified=False` serves unreviewed transcriptions. A vision model can misread numbers and units, so spot-check pages with measurements and warnings first.
-- `voicedesk.log` stores questions, transcripts and replies in plaintext. It is git-ignored; decide a retention rule before any real caller.
-- A pasted `.wav` path with surrounding quotes is treated as a text question, and a failed voice turn can end the chat loop.
-- The in-memory search cache is cleared only by the process that ran the ingest. A separate server process can serve stale results until restarted. Either stamp cache keys with the manifest's modified time or remove the cache.
-- `manual_pages.py` reads PDFs from `manual_sources/` directly, not from a per-tenant subfolder, so every PDF there lands under the tenant name you pass.
-- The embedding model is English-focused. Test a multilingual model before serving Hindi or Punjabi callers.
-- Near-duplicate chunks from repeated manual sections can crowd out other results in the top 3.
+- The `.wav` path in `agent.py` calls `answer()` directly, so it has no tools, no booking, no notes and no call
+  log. Only typed input goes through `Session`.
+- `agent.py` builds `Session` without a caller phone number or voice mode, so bookings made in the terminal
+  have no phone number.
+- `agent.py` ingests with `only_verified=False`, so unreviewed transcriptions are served. A vision model can
+  misread numbers and units, so check prices, hours and warnings against the PDF before you verify a page.
+- `retrieval.min_score` (0.20) is a default, not a measured value.
+- The in-memory search cache is cleared only by the process that ran the ingest, so a separate long-running
+  process can serve stale results until it restarts.
+- `tts.py` raises a `NameError` if the response has no usage data, because `usage` is only set inside an `if`.
+- The embedding model is English-focused. Test a multilingual model before serving other languages.
+- Near-duplicate chunks from repeated manual sections can crowd out other results.
 
-## Telephony notes [planned]
+## Roadmap
 
-- A phone call reaches your software only if a carrier delivers it. Each tenant needs a number (DID) on a carrier you control, and a business can forward its existing number to it.
-- Develop with a browser microphone and a local softphone first. They exercise the same agent logic. Buy one real number only for the final demo, and start the KYC paperwork early.
-- Calls arrive as 8 kHz mu-law audio, while models expect 16 or 24 kHz PCM, so the transport needs resampling in both directions and a way to flush audio when the caller interrupts.
-- Disclose the AI and any recording at the start of every call. Sending caller audio to a third-party model provider raises consent and data-protection questions (India's DPDP Act); check them before real use.
+- [ ] Evaluation set per tenant, then choose `min_score` from the results
+- [ ] Review pages with numbers and warnings, then switch to `only_verified=True`
+- [ ] Send the voice path through `Session` (tools, call log, summary)
+- [ ] Owner alerts (Telegram) and call transfer from the `owner` config
+- [ ] Injection test suite: caller attacks and poisoned documents, run after every prompt change
+- [ ] Live microphone and streaming speech, then barge-in and call limits
+- [ ] FastAPI portal: profile, document upload with status, test call, call list
+- [ ] Telephony: local softphone first, then one real number
+
+## Telephony and privacy notes
+
+- A phone call reaches your software only if a carrier delivers it. Each tenant needs a number on a carrier
+  you control, and a business can forward its existing number to it.
+- Develop with a browser or laptop microphone first, and buy a real number only for the final demo.
+- Tell callers they are speaking to an AI, and tell them if the call is recorded or logged. Call logs hold what
+  callers say, so keep `calls/` out of git and decide how long to keep it. Sending caller audio to a model
+  provider raises consent and data-protection questions (for example India's DPDP Act); check them before
+  real use.
