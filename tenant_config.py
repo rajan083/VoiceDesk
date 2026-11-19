@@ -116,6 +116,16 @@ def tenant_for_number(dialed):
         return None
     return _number_index().get(n)
 
+def resolve_tenant(value):
+    """Tenant id, phone number or exact business name -> tenant id, or None. Never guesses."""
+    ids = all_tenant_ids()
+    if value in ids:
+        return value
+    t = tenant_for_number(value)
+    if t:
+        return t
+    m = [i for i in ids if load_tenant(i)["business_name"].lower() == value.strip().lower()]
+    return m[0] if len(m) == 1 else None
 
 def create_tenant(business_name, phone_numbers=(), tenant_id=None, **overrides):
     """Create a tenant and its folders. The ID is generated unless one is passed. Returns the config."""

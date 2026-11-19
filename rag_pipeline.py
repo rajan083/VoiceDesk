@@ -14,7 +14,7 @@ MAX_CHUNK_TOKENS = 180       # model limit 128 minus ~25 for the "title: " prefi
 
 MIN_CHUNK_SENTENCES = 2
 MIN_CHUNK_WORDS = 15
-MIN_SCORE = 0.20             # placeholder: measure it
+MIN_SCORE = 0.20
 CACHE_MAX = 500
 SKIP_FILES = {"index.md", "log.md", "changelog.md"}
 
@@ -190,7 +190,7 @@ def ingest_tenant(tenant_id, only_verified=True):
         title = str(meta.get("title", rel))
         chunks = chunk_body(body, model)
         if chunks:
-            vecs = model.encode([f"{title}: {c}" for c in chunks], normalize_embeddings=True, show_progess_bar=False).tolist()
+            vecs = model.encode([f"{title}: {c}" for c in chunks], normalize_embeddings=True, show_progress_bar=False).tolist()
             col.upsert(ids=[f"{rel}::{i}" for i in range(len(chunks))],
                        embeddings=vecs, documents=chunks,
                        metadatas=[{"source": rel, "title": title,

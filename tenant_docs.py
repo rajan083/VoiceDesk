@@ -175,6 +175,10 @@ if __name__ == "__main__":
     p = sub.add_parser("ingest"); p.add_argument("tenant"); p.add_argument("--include-unverified", action="store_true")
     p = sub.add_parser("remove"); p.add_argument("tenant"); p.add_argument("doc"); p.add_argument("--yes", action="store_true")
     a = ap.parse_args()
+    t = tc.resolve_tenant(a.tenant)
+    if not t:
+        sys.exit(f"no tenant matches {a.tenant!r}")
+    a.tenant = t
     try:
         if a.cmd == "add":      add(a.tenant, a.pdf, a.replace)
         elif a.cmd == "status": status(a.tenant)
