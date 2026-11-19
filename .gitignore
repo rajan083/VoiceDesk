@@ -9,3 +9,5 @@ tenants/
 questions.txt
 models/
 voicedesk.log
+speech.wav
+reply.wav

@@ -3,7 +3,9 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 import rag_pipeline as rag
-import tenant_config as tc 
+import tenant_config as tc
+from tts import tts_llm
+from stt import stt_llm
 
 load_dotenv()
 client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
@@ -26,7 +28,7 @@ def llm(system, user):
     return r.text
 
 
-def answer(tenant_id, question):
+def answer(tenant_id, question, voice=False):
     r = tc.load_tenant(tenant_id)["retrieval"]
     kw = dict(top_k=r["top_k"], min_score=r["min_score"])
     hits = (rag.search(tenant_id, question, tier="concept", **kw)
@@ -37,11 +39,23 @@ def answer(tenant_id, question):
         log.warning("tenant=%s no hits for q=%r", tenant_id, question)
     context = "\n\n".join(h["text"] for h in hits) or "(nothing relevant found)"
     system = "Answer using only the context. If it has no answer, say you don't know."
+    if voice:
+        system += " Reply in one or two short plain sentences, with no lists or markdown."
     user = f"<context>\n{context}\n</context>\n\nQuestion: {question}"
     t0 = time.time()
     reply = llm(system, user)
     log.info("tenant=%s llm_ms=%d\nreply:\n%s", tenant_id, (time.time() - t0) * 1000, reply)
     return reply, hits
+
+
+def voice_answer(tenant_id, audio_path, out_path="reply.wav"):
+    t0 = time.time(); question = stt_llm(audio_path)
+    t1 = time.time(); reply, hits = answer(tenant_id, question, voice=True)
+    t2 = time.time(); tts_llm(reply, filename=out_path)
+    t3 = time.time()
+    log.info("tenant=%s stt_ms=%d answer_ms=%d tts_ms=%d heard=%r",
+             tenant_id, (t1-t0)*1000, (t2-t1)*1000, (t3-t2)*1000, question)
+    return question, reply, hits
 
 
 def resolve_tenant(value):
@@ -59,6 +73,7 @@ if __name__ == "__main__":
     logging.basicConfig(filename="voicedesk.log", level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    
     
     if len(sys.argv) != 2:
         sys.exit('usage: python agent.py <tenant id | phone number | business name>')
@@ -82,6 +97,12 @@ if __name__ == "__main__":
             break
         if not q:
             continue
+        if q.lower().endswith(".wav"):
+            heard, reply, hits = voice_answer(TENANT_ID, q)
+            print(f"Heard: {heard}\nResponse: {reply}")
+            print("Sources:", ", ".join(sorted({h["source"] for h in hits})) or "none", "\n")
+            os.startfile("reply.wav")
+            continue
         reply, hits = answer(TENANT_ID, q)
         print(f"Response: {reply}")
-        print("Sources:", ", ".join(sorted({h["source"] for h in hits})) or "none", "\n")
+        log.info("Sources: %s", ", ".join(sorted({h["source"] for h in hits})) or "none")
