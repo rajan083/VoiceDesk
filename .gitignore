@@ -5,3 +5,5 @@ kb/
 manual_sources/
 vector_store/
 __pycache__/
+tenants/
+questions.txt

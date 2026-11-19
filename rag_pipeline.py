@@ -67,7 +67,7 @@ def semantic_chunks(text, model):
     tcount = _token_counts(sents) if sents else []
     if len(sents) <= MIN_CHUNK_SENTENCES:
         return [p for s, n in zip(sents, tcount) for p in _fit(s, n)]
-    vecs = np.asarray(model.encode(sents, normalize_embeddings=True))
+    vecs = np.asarray(model.encode(sents, normalize_embeddings=True, show_progress_bar= False))
     dists = 1 - (vecs[:-1] * vecs[1:]).sum(axis=1)
     cutoff = np.percentile(dists, BREAKPOINT_PERCENTILE)
     chunks, cur, toks = [], [], 0
@@ -188,7 +188,7 @@ def ingest_tenant(tenant_id, only_verified=True):
         title = str(meta.get("title", rel))
         chunks = chunk_body(body, model)
         if chunks:
-            vecs = model.encode([f"{title}: {c}" for c in chunks], normalize_embeddings=True).tolist()
+            vecs = model.encode([f"{title}: {c}" for c in chunks], normalize_embeddings=True, show_progess_bar=False).tolist()
             col.upsert(ids=[f"{rel}::{i}" for i in range(len(chunks))],
                        embeddings=vecs, documents=chunks,
                        metadatas=[{"source": rel, "title": title,
@@ -214,7 +214,7 @@ def search(tenant_id, query, top_k=3, min_score=MIN_SCORE, tier=None):
     col = _col(tenant_id)
     if col.count() == 0:
         return []
-    q = _model().encode([query], normalize_embeddings=True).tolist()
+    q = _model().encode([query], normalize_embeddings=True, show_progress_bar=False).tolist()
     kwargs = {"query_embeddings": q, "n_results": min(top_k, col.count())}
     if tier:
         kwargs["where"] = {"tier": tier}
