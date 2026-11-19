@@ -7,6 +7,7 @@ KB_DIR = os.path.join(BASE_DIR, "kb")                    # kb/<tenant_id>/**/*.m
 STORE_DIR = os.path.join(BASE_DIR, "vector_store")
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"   # swap after your bake-off
 INGEST_VERSION = "v4"        # bump when chunking changes -> everything re-ingests
+MODEL_DIR = os.path.join(BASE_DIR, "models", EMBEDDING_MODEL)
 
 BREAKPOINT_PERCENTILE = 90   # higher = fewer, larger chunks
 MAX_CHUNK_TOKENS = 180       # model limit 128 minus ~25 for the "title: " prefix and special tokens
@@ -23,8 +24,9 @@ def _model():
     global _model_obj
     if _model_obj is None:
         from sentence_transformers import SentenceTransformer
-        try:    _model_obj = SentenceTransformer(EMBEDDING_MODEL, local_files_only=True)
-        except Exception: _model_obj = SentenceTransformer(EMBEDDING_MODEL)
+        if not os.path.isdir(MODEL_DIR):                       # first run: save a local copy
+            SentenceTransformer(EMBEDDING_MODEL).save(MODEL_DIR)
+        _model_obj = SentenceTransformer(MODEL_DIR)
     return _model_obj
 
 def _col(tenant_id):

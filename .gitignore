@@ -7,3 +7,5 @@ vector_store/
 __pycache__/
 tenants/
 questions.txt
+models/
+voicedesk.log
