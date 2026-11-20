@@ -59,17 +59,6 @@ def voice_answer(tenant_id, audio_path, out_path="reply.wav"):
     return question, reply, hits
 
 
-def resolve_tenant(value):
-    if value in tc.all_tenant_ids():                       # tenant id
-        return value
-    t = tc.tenant_for_number(value)                        # dialed number
-    if t:
-        return t
-    matches = [t for t in tc.all_tenant_ids()              # business name
-               if tc.load_tenant(t)["business_name"].lower() == value.strip().lower()]
-    return matches[0] if len(matches) == 1 else None
-
-
 if __name__ == "__main__":
     logging.basicConfig(filename="voicedesk.log", level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
@@ -78,7 +67,7 @@ if __name__ == "__main__":
     
     if len(sys.argv) not in (2, 3):
         sys.exit('usage: python agent.py <tenant id | phone number | business name> [caller number]')
-    TENANT_ID = resolve_tenant(sys.argv[1])
+    TENANT_ID = tc.resolve_tenant(sys.argv[1])
     if not TENANT_ID:
         sys.exit(f"no tenant matches {sys.argv[1]!r}")
     try:

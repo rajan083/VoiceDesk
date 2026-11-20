@@ -117,15 +117,20 @@ def tenant_for_number(dialed):
     return _number_index().get(n)
 
 def resolve_tenant(value):
-    """Tenant id, phone number or exact business name -> tenant id, or None. Never guesses."""
+    """tenant id, dialed number or business name -> tenant id, or None."""
+    value = (value or "").strip()
+    if not value:
+        return None
     ids = all_tenant_ids()
-    if value in ids:
-        return value
-    t = tenant_for_number(value)
+    for t in ids:                                   # id, ignoring case
+        if t.lower() == value.lower():
+            return t
+    t = tenant_for_number(value)                    # dialed number
     if t:
         return t
-    m = [i for i in ids if load_tenant(i)["business_name"].lower() == value.strip().lower()]
-    return m[0] if len(m) == 1 else None
+    names = [t for t in ids                         # business name, ignoring case
+             if load_tenant(t)["business_name"].strip().lower() == value.lower()]
+    return names[0] if len(names) == 1 else None
 
 def connect_owner(tenant_id, minutes=10):
     """Print a one-time Telegram link and wait for the owner to tap it. Saves their chat id in the config."""
