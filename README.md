@@ -2,13 +2,14 @@
 
 An AI phone receptionist for small businesses, built from scratch on hosted Gemini APIs (no voice platform).
 It answers questions from a business's own manual (RAG), books appointments, passes messages to the owner,
-notifies the owner and confirms to the customer, and keeps a log and summary of every call. Each business is a
+alerts the owner about bookings and messages, and keeps a log and summary of every call. Each business is a
 separate **tenant** with its own phone number, settings, knowledge base and bookings.
 
 > **Status: working terminal prototype.** The knowledge pipeline, the multi-tenant setup, the agent with tools,
-> speech in and out (on audio files), booking alerts and call logs work. Live microphone streaming, real
-> telephony, a web chat server and a portal are not built. Each section is marked `[built]`, `[partial]` or
-> `[planned]`. Update the markers as the project changes, and don't describe a planned part as working.
+> speech in and out (on audio files), owner alerts and call logs work. Customer confirmations, live microphone
+> streaming, real telephony, a web chat server and a portal are not built. Each section is marked `[built]`,
+> `[partial]` or `[planned]`. Update the markers as the project changes, and don't describe a planned part as
+> working.
 
 ## Status
 
@@ -21,13 +22,14 @@ separate **tenant** with its own phone number, settings, knowledge base and book
 | Agent with tools (`agent.py`, `session.py`) | [built] | Gemini chat with function calling |
 | Typed and spoken turns share one `Session` | [built] | Same tools, conversation and call log for both |
 | Appointments and notes (`bookings.py`) | [built] | Booking tools only when a tenant has a `scheduling` block |
-| Caller number from caller ID, address capture | [built] | Terminal simulates caller ID with an argument |
-| Owner alerts and customer confirmations (`notify.py`) | [built] | Channels: outbox file, Telegram. Email and WhatsApp written, untested |
+| Address capture | [built] | The agent asks for it unless the tenant sets `ask_address` to false |
+| Caller ID number reaches the session | [partial] | `agent.py` reads the number argument but doesn't pass it to `Session` yet |
+| Owner alerts for bookings and notes (`notify.py`) | [built] | Channels: outbox file, Telegram. Email and WhatsApp written, untested |
 | Owner onboarding by one-time Telegram link | [built] | Part of `tenant_config.py`, runs when a tenant is created |
 | Call log and summary (`calllog.py`), report (`report.py`) | [built] | One log per call, summary at hangup |
 | Speech in/out (`stt.py`, `tts.py`) | [partial] | Works on `.wav` files, one request at a time, not streaming |
 | Review gate (`verified: true`) | [partial] | Implemented, but `agent.py` ingests with `only_verified=False` |
-| Real customer delivery (SMS or WhatsApp) | [planned] | Customer messages currently go to the outbox file |
+| Customer confirmation messages (SMS or WhatsApp) | [planned] | No message is sent to the customer yet |
 | Retrieval tuning and evaluation set | [planned] | `min_score` is a per-tenant setting, not yet measured |
 | Live microphone, streaming, barge-in | [planned] | |
 | Web chat server and telephony | [planned] | |
@@ -48,7 +50,7 @@ ONLINE: one conversation
    -> Session (one per call): retrieve chunks for the question -> Gemini chat + tools -> reply
          tools:  save_note                              (always)
                  check_availability, book_appointment   (only if the tenant has a scheduling block)
-   -> notify.py: owner alert + customer confirmation (booking), owner alert (note)
+   -> notify.py: owner alert for a booking or a note (customer confirmation: planned)
    -> tts.py (if audio) -> reply.wav
  on exit -> calls/<tenant>/ log + summary -> report.py
 ```
@@ -60,7 +62,7 @@ VoiceDesk/
   agent.py              entry point: resolves the tenant, indexes new pages, chat loop, .wav input
   session.py            one Session per call: prompt, tools, retrieval per turn, call log, summary at close
   bookings.py           availability, booking and notes storage used by the tools
-  notify.py             owner alerts and customer confirmations (outbox, Telegram, email, WhatsApp)
+  notify.py             owner alerts for bookings and notes (outbox, Telegram, email, WhatsApp)
   calllog.py            per-call log and summary
   report.py             builds a report from the call summaries
   rag_pipeline.py       chunking, embedding, ChromaDB ingest and search (one collection per tenant)
@@ -75,7 +77,7 @@ VoiceDesk/
   kb/<id>/raw/          transcribed pages, one .md per page  (data, not committed)
   vector_store/         ChromaDB data and ingest manifests   (data, not committed)
   calls/<id>/           call logs and summaries              (data, not committed)
-  outbox.jsonl          messages "sent" through the outbox channel (not committed)
+  outbox.jsonl          messages "sent" through the outbox channel (created where you run; see Known issues)
   voicedesk.log         application log (not committed)
 ```
 
@@ -99,6 +101,7 @@ TELEGRAM_BOT_TOKEN=your-bot-token          # owner alerts, see "Notifications"
 # SMTP_APP_PASSWORD=...
 # WA_TOKEN=...
 # WA_PHONE_NUMBER_ID=...
+# WA_GRAPH_VERSION=v26.0                   # optional
 ```
 
 `.env`, the log files, `outbox.jsonl` and the data folders must stay out of git. Never commit an API key or bot
@@ -119,7 +122,8 @@ python tenant_config.py check
 
 IDs are generated (`t_` plus 12 hex characters). Use `--id demo` only for a fixed name. After the tenant is
 created, the command prints a one-time Telegram link and waits up to 10 minutes for the owner to tap it, which
-saves the owner's chat ID in the tenant's config. Press Ctrl+C to skip, or use `--no-telegram`.
+saves the owner's chat ID in the tenant's config. Press Ctrl+C to skip, or use `--no-telegram`. If
+`TELEGRAM_BOT_TOKEN` is not set, this step is skipped.
 Connect an owner later with `python tenant_config.py link <tenant>`.
 
 **2. Add and review a document**
@@ -141,9 +145,9 @@ indexed. `ingest --include-unverified` is for development only. To remove a docu
 python agent.py "Plumbing Agency" +919999900000
 ```
 
-The optional second argument is the caller's number, which simulates caller ID. The agent plays the tenant's
-greeting, indexes any new pages, then answers until you type `exit` or `quit`. On exit it prints the call summary.
-Leave the number off to test the case where the number is unknown and the agent has to ask for one.
+The optional second argument is meant to simulate caller ID. Today it is checked but not passed to the session
+(see Known issues), so the agent always asks for a number. The agent plays the tenant's greeting, indexes any
+new pages, then answers until you type `exit` or `quit`. On exit it prints the call summary.
 
 **4. Try the voice path**
 
@@ -194,8 +198,10 @@ A tenant that takes bookings and sends notifications also has:
 - Phone numbers must be in +E.164 form, and one number can belong to only one tenant.
 - A `scheduling` block switches on `check_availability` and `book_appointment`. A day missing from `hours` is closed.
   Set `"ask_address": false` for a business that doesn't need an address (a clinic, for example).
-- `notify.owner_to` is set automatically when the owner taps the Telegram link. `customer_channel` and
-  `confirm_customer` control confirmations to the customer.
+- `notify.owner_to` is set automatically when the owner taps the Telegram link, and `owner_channel` says how the
+  alert is sent (`outbox`, `telegram`, `email` or `whatsapp`). With no `owner_to`, no alert is sent.
+- `customer_channel` and `confirm_customer` are saved by the link command but nothing reads them yet.
+  `owner.notify_telegram_chat_id` and `owner.transfer_number` are reserved and unused too.
 - Tune `top_k` and `min_score` per tenant against its own test questions.
 
 ## Knowledge pipeline
@@ -230,11 +236,12 @@ A tenant that takes bookings and sends notifications also has:
 - **Booking flow:** ask for the caller's name, what they need help with, the address (unless the tenant turns it
   off) and the preferred day, check availability, offer two or three times, read back the date, time and name, wait
   for a yes, then book and read out the confirmation code. The prompt forbids inventing times, codes or availability.
-- **Caller number:** if caller ID provides it, the agent never asks for it. If not, it asks for a number, and that
-  number is treated as unverified: it appears in the owner's alert but is never used to send a confirmation.
+- **Caller number:** when the session is given a caller number, the agent never asks for it. Otherwise it asks
+  for one, and the owner's alert marks that number "not verified" (a caller-ID number is marked "caller ID").
 - **Notes:** `save_note` passes a message or callback request to the owner, and the agent only says it was passed
   on after the tool returns ok.
-- **Confirmations:** the agent says a confirmation was sent only if the booking result reports it.
+- **Confirmations:** the agent says a confirmation was sent only if the booking result reports it. No customer
+  message is sent yet, so the result never reports it and the agent never claims one.
 - **Spoken replies:** on a spoken turn, replies are one or two short plain sentences with no lists or markdown.
 - **Tenant and caller phone are set by the server.** The model never sees or sets `tenant_id` or the caller ID
   number, and an unknown dialed number never falls back to a default tenant.
@@ -252,7 +259,8 @@ so a caller can't talk the agent into messaging a stranger. A failed send is log
 | `whatsapp` | [partial] | Meta Cloud API. Written, untested. Free-form text works only inside the 24-hour window, and production needs approved templates |
 
 - **Booking:** the owner gets the name, time, service, address, phone (marked "caller ID" or "not verified") and code.
-  The customer gets a confirmation only when the number came from caller ID.
+- **Customer confirmation** [planned]: `booking_alerts` only messages the owner. The customer branch, and the
+  `customer` result that `session.py` looks for, don't exist yet.
 - **Notes:** the owner gets the caller's message.
 - **Connecting an owner:** when a tenant is created, a one-time Telegram link is printed. When the owner taps it,
   the bot receives the code with their chat ID, and the ID is saved in `notify.owner_to`. The code is random and
@@ -274,7 +282,14 @@ Model names change often, so check them against your account's current model lis
 
 - `agent.py` ingests with `only_verified=False`, so unreviewed transcriptions are served. A vision model can
   misread numbers and units, so check prices, hours and warnings against the PDF before you verify a page.
-- Customer confirmations go to a file, not to the customer, until a real SMS or WhatsApp provider is connected.
+- `agent.py` builds `Session(TENANT_ID, client, MODEL)` without `caller_phone`, so the caller number argument is
+  ignored. Until it is passed, the agent always asks for a number, and every booking uses the number the caller
+  typed, which the owner's alert marks as unverified.
+- No confirmation is sent to the customer. `notify.py` only messages the owner, so `confirmation_sent` is always false.
+- `.gitignore` does not list `outbox.jsonl`, which holds names, phone numbers and addresses. Add it before the next commit.
+- `voice_answer()` uses the global `session` created in the script's main block, and its first parameter, named
+  `tenant_id`, actually receives the session. It works when `agent.py` is run directly and breaks if imported.
+  `answer()` in `agent.py` is no longer called, so `llm()` is unused too.
 - Notifications are sent inside the tool call, which adds a fraction of a second to that turn, and there is no
   retry or queue.
 - Only the number from caller ID is trusted. A typed-in number is shown to the owner as unverified, and web chat
@@ -295,8 +310,10 @@ Model names change often, so check them against your account's current model lis
 ## Roadmap
 
 - [x] Send the voice path through `Session` (tools, call log, summary)
-- [x] Owner alerts by Telegram, booking confirmations by outbox
-- [x] Caller number from caller ID and address capture
+- [x] Owner alerts for bookings and notes (outbox, Telegram)
+- [x] Address capture
+- [ ] Pass the caller number from `agent.py` into `Session` so caller ID works in the terminal
+- [ ] Customer confirmation message for bookings, using the saved `customer_channel`
 - [ ] Evaluation set per tenant, then choose `min_score` from the results
 - [ ] Review pages with numbers and warnings, then switch to `only_verified=True`
 - [ ] Injection test suite: caller attacks and poisoned documents, run after every prompt change

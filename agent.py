@@ -96,7 +96,7 @@ if __name__ == "__main__":
     if "error" in result:
         sys.exit(1)
     print("\nType exit/quit to exit.\n")
-    session= Session(TENANT_ID, client, MODEL)
+    session= Session(TENANT_ID, client, MODEL, caller_phone=caller)
     while True:
         q = input("You: ").strip()
         if q.lower() in ("exit", "quit"):
