@@ -17,7 +17,7 @@ CLI (run from the VoiceDesk folder; the square brackets mean optional, do not ty
     python tenant_config.py list
     python tenant_config.py check
 """
-import argparse, copy, functools, json, os, re, uuid
+import argparse, copy, functools, json, os, re, uuid, secrets, time
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TENANTS_DIR = os.path.join(BASE_DIR, "tenants")
@@ -127,6 +127,56 @@ def resolve_tenant(value):
     m = [i for i in ids if load_tenant(i)["business_name"].lower() == value.strip().lower()]
     return m[0] if len(m) == 1 else None
 
+def connect_owner(tenant_id, minutes=10):
+    """Print a one-time Telegram link and wait for the owner to tap it. Saves their chat id in the config."""
+    import urllib.request, urllib.parse
+    from dotenv import load_dotenv
+    load_dotenv()
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if not token:
+        print("TELEGRAM_BOT_TOKEN is not set, skipping Telegram.")
+        return False
+
+    def call(method, **p):
+        req = urllib.request.Request(f"https://api.telegram.org/bot{token}/{method}",
+                                     data=urllib.parse.urlencode(p).encode())
+        with urllib.request.urlopen(req, timeout=40) as r:
+            return json.load(r)["result"]
+
+    cfg, code = load_tenant(tenant_id), secrets.token_urlsafe(16)
+    print(f"Send this link privately to the owner of {cfg['business_name']}:")
+    print(f"https://t.me/{call('getMe')['username']}?start={code}")
+    print(f"Waiting up to {minutes} minutes for the owner to tap it (Ctrl+C to skip)...")
+    deadline, offset = time.time() + minutes * 60, None
+    while time.time() < deadline:
+        try:
+            updates = call("getUpdates", timeout=25, **({"offset": offset} if offset else {}))
+        except Exception:
+            time.sleep(3)
+            continue
+        for u in updates:
+            offset = u["update_id"] + 1
+            m = u.get("message") or {}
+            chat = m.get("chat") or {}
+            if chat.get("type") == "private" and (m.get("text") or "").strip() == f"/start {code}":
+                path = _config_path(tenant_id)
+                with open(path, encoding="utf-8") as f:
+                    raw = json.load(f)
+                n = raw.setdefault("notify", {})
+                n.update(owner_channel="telegram", owner_to=str(chat["id"]))
+                n.setdefault("customer_channel", "outbox")
+                n.setdefault("confirm_customer", True)
+                with open(path + ".tmp", "w", encoding="utf-8") as f:
+                    json.dump(raw, f, indent=2, ensure_ascii=False)
+                os.replace(path + ".tmp", path)
+                reload()
+                call("sendMessage", chat_id=chat["id"],
+                     text=f"Connected. Bookings and messages for {cfg['business_name']} will arrive here.")
+                print("Owner connected, chat id saved.")
+                return True
+    print(f"Timed out. Run: python tenant_config.py link {tenant_id}")
+    return False
+
 def create_tenant(business_name, phone_numbers=(), tenant_id=None, **overrides):
     """Create a tenant and its folders. The ID is generated unless one is passed. Returns the config."""
     if not str(business_name).strip():
@@ -160,6 +210,8 @@ if __name__ == "__main__":
     p.add_argument("business_name")
     p.add_argument("--id", dest="tenant_id", default=None)
     p.add_argument("--number", action="append", default=[])
+    p.add_argument("--no-telegram", action="store_true") 
+    p = sub.add_parser("link"); p.add_argument("tenant") 
     sub.add_parser("list")
     sub.add_parser("check")
     a = ap.parse_args()
@@ -169,6 +221,10 @@ if __name__ == "__main__":
         print(f"created tenant {t} ({cfg['business_name']})")
         print("  config:", _config_path(t))
         print("  pages :", os.path.join(KB_DIR, t, "raw"))
+        if not a.no_telegram:
+            connect_owner(t)
+    elif a.cmd == "link":
+        connect_owner(resolve_tenant(a.tenant) or exit(f"no tenant matches {a.tenant!r}"))
     elif a.cmd == "list":
         for t in all_tenant_ids():
             c = load_tenant(t)

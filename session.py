@@ -1,14 +1,17 @@
 """One Session per call. Holds the conversation (via the SDK chat object),
 the tenant, the tools and the call log. agent.py builds it and calls turn()."""
+import re
 import datetime as dt
 from zoneinfo import ZoneInfo
-
 from google.genai import types
-
+import logging
 import bookings
+import notify
 import rag_pipeline as rag
 import tenant_config as tc
 from calllog import CallLog, summarize
+
+_log = logging.getLogger("voicedesk.session")
 
 BASE_PROMPT = (
     "You are the phone receptionist for {business}. "
@@ -22,6 +25,7 @@ BASE_PROMPT = (
     "If the caller leaves a message, asks for a callback, or gives a detail the owner should know "
     "that is not part of a booking, call save_note with a short factual note, and say it has been "
     "passed on only after the tool returns ok."
+    "Say a confirmation message was sent only if the booking result has confirmation_sent true."
 )
 VOICE_RULES = " Reply in one or two short plain sentences, with no lists or markdown."
 
@@ -34,6 +38,8 @@ def make_tools(tenant_id, sch, caller_phone, log):
         """Pass a short message to the business owner (a callback request, a detail to know). Not for booking details."""
         out = bookings.add_note(tenant_id, log.id, note)
         log.add("tool", "save_note", args={"note": note}, result=out)
+        if out.get("ok"):
+            log.add("tool", "notify", result=notify.note_alert(tenant_id, note, caller_phone))
         return out
 
     def check_availability(day: str) -> dict:
@@ -48,12 +54,22 @@ def make_tools(tenant_id, sch, caller_phone, log):
         log.add("tool", "check_availability", args={"day": day}, result=out)
         return out
 
-    def book_appointment(start: str, caller_name: str, service: str = "", notes: str = "") -> dict:
-        """Book one slot. start is YYYY-MM-DDTHH:MM. Call only after the caller confirmed the time and name."""
-        out = bookings.book(tenant_id, sch, start, caller_name, caller_phone, service, notes)
+    def book_appointment(start: str, caller_name: str, address: str = "", service: str = "",
+                         phone: str = "", notes: str = "") -> dict:
+        """Book one slot. start is YYYY-MM-DDTHH:MM. address is where the work is needed. phone only if the
+        caller's number is not already known. Call only after the caller confirmed the time and name."""
+        contact = caller_phone or re.sub(r"[^\d+]", "", phone)[:16]
+        if address:
+            notes = f"Address: {address}. {notes}".strip()          # keeps bookings.py unchanged
+        out = bookings.book(tenant_id, sch, start, caller_name, contact, service, notes)
         log.add("tool", "book_appointment",
-                args={"start": start, "caller_name": caller_name, "service": service, "notes": notes},
-                result=out)
+                args={"start": start, "caller_name": caller_name, "address": address,
+                      "service": service, "phone": phone, "notes": notes}, result=out)
+        if out.get("ok"):
+            sent = notify.booking_alerts(tenant_id, out, start, caller_name, service,
+                                         caller_phone, address, contact)
+            log.add("tool", "notify", result=sent)
+            out = {**out, "confirmation_sent": bool(sent.get("customer", {}).get("ok"))}
         return out
 
     return [save_note] + ([check_availability, book_appointment] if sch else [])
@@ -69,6 +85,11 @@ class Session:
         if sch:
             now = dt.datetime.now(ZoneInfo(sch["timezone"]))
             system += f" Today is {now:%A %Y-%m-%d %H:%M} ({sch['timezone']})."
+            if sch.get("ask_address", True):
+                system += " Also ask for the address where the work is needed and pass it as address."
+            system += (" The caller's phone number is already known from caller ID, so never ask for it."
+                       if caller_phone else
+                       " The caller's phone number is not known, so ask for a number to reach them and pass it as phone.")
         if voice:
             system += VOICE_RULES
         self.chat = client.chats.create(model=model, config=types.GenerateContentConfig(
@@ -81,11 +102,15 @@ class Session:
         return (rag.search(self.tenant_id, question, tier="concept", **kw)
                 or rag.search(self.tenant_id, question, tier="raw", **kw))
 
-    def turn(self, question):
+    def turn(self, question, voice=False):
         hits = self._retrieve(question)
+        _log.info("tenant=%s q=%r hits=%s", self.tenant_id, question,[(h["source"], h["tier"], h["score"]) for h in hits])
         ctx = "\n\n".join(h["text"] for h in hits) or "(nothing relevant found)"
-        self.log.add("caller", question)          # before the model call, so tool rows land after it
-        reply = self.chat.send_message(f"<context>\n{ctx}\n</context>\n\nCaller: {question}").text
+        self.log.add("caller", question)
+        msg = f"<context>\n{ctx}\n</context>\n\nCaller: {question}"
+        if voice:
+            msg += f"\n\n{VOICE_RULES.strip()}"
+        reply = self.chat.send_message(msg).text
         self.log.add("agent", reply, sources=[h["source"] for h in hits])
         return reply, hits
 

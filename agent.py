@@ -51,11 +51,11 @@ def answer(tenant_id, question, voice=False):
 
 def voice_answer(tenant_id, audio_path, out_path="reply.wav"):
     t0 = time.time(); question = stt_llm(audio_path)
-    t1 = time.time(); reply, hits = answer(tenant_id, question, voice=True)
+    t1 = time.time(); reply, hits = session.turn(question, voice=True)
     t2 = time.time(); tts_llm(reply, filename=out_path)
     t3 = time.time()
-    log.info("tenant=%s stt_ms=%d answer_ms=%d tts_ms=%d heard=%r",
-             tenant_id, (t1-t0)*1000, (t2-t1)*1000, (t3-t2)*1000, question)
+    log.info("tenant=%s stt_ms=%d turn_ms=%d tts_ms=%d heard=%r",
+             session.tenant_id, (t1-t0)*1000, (t2-t1)*1000, (t3-t2)*1000, question)
     return question, reply, hits
 
 
@@ -76,12 +76,15 @@ if __name__ == "__main__":
     logging.getLogger("httpx").setLevel(logging.WARNING)
     
     
-    if len(sys.argv) != 2:
-        sys.exit('usage: python agent.py <tenant id | phone number | business name>')
-        
+    if len(sys.argv) not in (2, 3):
+        sys.exit('usage: python agent.py <tenant id | phone number | business name> [caller number]')
     TENANT_ID = resolve_tenant(sys.argv[1])
     if not TENANT_ID:
         sys.exit(f"no tenant matches {sys.argv[1]!r}")
+    try:
+        caller = tc.normalize_number(sys.argv[2]) if len(sys.argv) == 3 else None
+    except ValueError as e:
+        sys.exit(str(e))
         
     cfg = tc.load_tenant(TENANT_ID)
     log.info("resolved %r -> %s", sys.argv[1], TENANT_ID)
@@ -105,7 +108,7 @@ if __name__ == "__main__":
         if not q:
             continue
         if q.lower().endswith(".wav"):
-            heard, reply, hits = voice_answer(TENANT_ID, q)
+            heard, reply, hits = voice_answer(session, q)
             print(f"Heard: {heard}\nResponse: {reply}")
             print("Sources:", ", ".join(sorted({h["source"] for h in hits})) or "none", "\n")
             os.startfile("reply.wav")
