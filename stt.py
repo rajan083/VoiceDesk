@@ -8,7 +8,8 @@ load_dotenv()
 client = genai.Client(api_key=os.environ["GEMINI_API_KEY"],
                       http_options=types.HttpOptions(api_version="v1beta"))
 
-STT_MODELS = [os.environ["GEMINI_API_KEY"]] + [m.strip() for m in os.environ.get("FALLBACK_MODELS", "").split(",") if m.strip()]
+STT_MODEL = "gemini-3.1-flash-lite"
+STT_MODELS = [STT_MODEL] + [m.strip() for m in os.environ.get("FALLBACK_MODELS", "").split(",") if m.strip() and m.strip() != STT_MODEL]
 
 def stt_llm(path, retries=3):
     with open(path, 'rb') as f:
