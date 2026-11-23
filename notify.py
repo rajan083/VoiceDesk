@@ -80,3 +80,24 @@ def note_alert(tenant_id, note, caller_phone, contact_phone=""):
     who = _who(caller_phone, contact_phone)
     return {"owner": send(n.get("owner_channel", "outbox"), n["owner_to"],
             f"Message from caller {who}: {_clean(note, 300)}")}
+    
+def lead_alert(tenant_id, caller_name, need, address, callback_time, caller_phone, contact_phone=""):
+    n = tc.load_tenant(tenant_id).get("notify") or {}
+    if not n.get("owner_to"):
+        return {}
+    return {"owner": send(n.get("owner_channel", "outbox"), n["owner_to"],
+            f"New lead\n"
+            f"Name: {_clean(caller_name, 60)}\n"
+            f"Need: {_clean(need, 150)}\n"
+            f"Address: {_clean(address, 150) or 'not given'}\n"
+            f"Call back: {_clean(callback_time, 60) or 'any time'}\n"
+            f"Phone: {_who(caller_phone, contact_phone)}")}
+    
+def transfer_alert(tenant_id, reason, caller_phone, contact_phone=""):
+    n = tc.load_tenant(tenant_id).get("notify") or {}
+    if not n.get("owner_to"):
+        return {}
+    return {"owner": send(n.get("owner_channel", "outbox"), n["owner_to"],
+            f"Caller asked to speak to you now\n"
+            f"Reason: {_clean(reason, 150) or 'not given'}\n"
+            f"Phone: {_who(caller_phone, contact_phone)}")}

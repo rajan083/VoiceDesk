@@ -26,6 +26,13 @@ BASE_PROMPT = (
     "If the caller leaves a message, asks for a callback, or gives a detail the owner should know "
     "that is not part of a booking, call save_note with a short factual note, and say it has been "
     "passed on only after the tool returns ok. "
+    "If the caller wants a quote, a callback or a visit but is not booking now, ask for their name and what "
+    "they need (and the address if relevant), then call save_lead, and say it has been passed on only after "
+    "the tool returns ok. Use save_note for any other message. "
+    "If the caller asks to speak to a person or the owner, or the matter is urgent, call transfer_to_owner. "
+    "Say you are transferring them only if the result status is transferring. If the status is "
+    "callback_requested, say the owner has been notified and will call them back. If it is not_available, "
+    "say you can't reach the owner right now and offer to take a message. "
     "If a tool returns the error phone_required, ask the caller for a phone number they can be reached on, "
     "then call the tool again with it. "
     "Say a confirmation message was sent only if the booking result has confirmation_sent true."
@@ -47,7 +54,7 @@ def _should_fall_back(e):
     return code in (404, 429, 500, 502, 503, 504) or any(
         s in text for s in ("resource_exhausted", "unavailable", "overloaded", "rate limit"))
 
-def make_tools(tenant_id, sch, caller_phone, log, require_phone=True):
+def make_tools(tenant_id, sch, caller_phone, log, require_phone=True, transfer=None):
     """tenant_id and caller_phone come from the server; the model never sees or sets them.
     save_note is always available; booking tools only when the tenant has a scheduling block."""
 
@@ -64,6 +71,48 @@ def make_tools(tenant_id, sch, caller_phone, log, require_phone=True):
         log.add("tool", "save_note", args={"note": note}, result=out)
         if out.get("ok"):
             log.add("tool", "notify", result=notify.note_alert(tenant_id, note, caller_phone, contact))
+        return out
+    
+    def save_lead(caller_name: str, need: str, address: str = "", callback_time: str = "",
+                  phone: str = "") -> dict:
+        """Save a caller's details for a follow-up call when they want a quote, a callback or a visit but are
+        not booking now. need is what they want help with. phone only if the caller's number is not already known."""
+        contact = _contact(caller_phone, phone)
+        if require_phone and not contact:
+            out = {"ok": False, "error": "phone_required"}
+            log.add("tool", "save_lead", args={"caller_name": caller_name}, result=out)
+            return out
+        lead = (f"LEAD: {caller_name[:60]}; need: {need[:150]}; address: {address[:150] or 'n/a'}; "
+                f"best time: {callback_time[:60] or 'any'}; phone: {contact or 'n/a'}")
+        out = bookings.add_note(tenant_id, log.id, lead)
+        log.add("tool", "save_lead",
+                args={"caller_name": caller_name, "need": need, "address": address,
+                      "callback_time": callback_time, "phone": phone}, result=out)
+        if out.get("ok"):
+            log.add("tool", "notify", result=notify.lead_alert(
+                tenant_id, caller_name, need, address, callback_time, caller_phone, contact))
+        return out
+    
+    asked = {}                      # one request per call, so a repeat can't spam the owner
+
+    def transfer_to_owner(reason: str = "", phone: str = "") -> dict:
+        """Connect the caller to the business owner now, when they ask to speak to a person or the owner,
+        or the matter is urgent. phone only if the caller's number is not already known."""
+        if "out" in asked:
+            return asked["out"]
+        contact = _contact(caller_phone, phone)
+        number = (tc.load_tenant(tenant_id).get("owner") or {}).get("transfer_number")   # never shown to the model
+        if number and transfer and transfer(number):
+            out = {"ok": True, "status": "transferring"}
+        elif require_phone and not contact:
+            out = {"ok": False, "error": "phone_required"}
+        else:
+            sent = notify.transfer_alert(tenant_id, reason, caller_phone, contact)
+            out = ({"ok": True, "status": "callback_requested"} if sent.get("owner", {}).get("ok")
+                   else {"ok": False, "status": "not_available"})
+        log.add("tool", "transfer_to_owner", args={"reason": reason, "phone": phone}, result=out)
+        if out["ok"]:
+            asked["out"] = out
         return out
 
     def check_availability(day: str) -> dict:
@@ -104,11 +153,11 @@ def make_tools(tenant_id, sch, caller_phone, log, require_phone=True):
             booked[key] = out
         return out
 
-    return [save_note] + ([check_availability, book_appointment] if sch else [])
+    return [save_note, save_lead, transfer_to_owner] + ([check_availability, book_appointment] if sch else [])
 
 
 class Session:
-    def __init__(self, tenant_id, client, model, voice=False, caller_phone=None):
+    def __init__(self, tenant_id, client, model, voice=False, caller_phone=None, transfer=None):
         self.tenant_id, self.client, self.model = tenant_id, client, model
         self.cfg = tc.load_tenant(tenant_id)
         self.log = CallLog(tenant_id)
@@ -131,7 +180,7 @@ class Session:
         self.model_idx = 0
         self._config = types.GenerateContentConfig(
             system_instruction=system, temperature=0.2,
-            tools=make_tools(tenant_id, sch, caller_phone, self.log, require_phone))
+            tools=make_tools(tenant_id, sch, caller_phone, self.log, require_phone, transfer))
         self.chat = client.chats.create(model=self.models[0], config=self._config)
         
     def _retrieve(self, question):

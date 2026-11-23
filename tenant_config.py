@@ -79,6 +79,9 @@ def load_tenant(tenant_id):
     if not str(cfg.get("business_name", "")).strip():
         raise ValueError(f"{path}: business_name is required")
     cfg["phone_numbers"] = [normalize_number(n) for n in cfg["phone_numbers"]]
+    t = (cfg.get("owner") or {}).get("transfer_number")
+    if t:
+        cfg["owner"]["transfer_number"] = normalize_number(t)
     r = cfg["retrieval"]
     if not (1 <= int(r["top_k"]) <= 10 and 0.0 <= float(r["min_score"]) <= 1.0):
         raise ValueError(f"{path}: retrieval.top_k must be 1-10 and min_score 0-1")
