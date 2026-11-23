@@ -49,7 +49,7 @@ def answer(tenant_id, question, voice=False):
     return reply, hits
 
 
-def voice_answer(tenant_id, audio_path, out_path="reply.wav"):
+def voice_answer(session, audio_path, out_path="reply.wav"):
     t0 = time.time(); question = stt_llm(audio_path)
     t1 = time.time(); reply, hits = session.turn(question, voice=True)
     t2 = time.time(); tts_llm(reply, filename=out_path)
@@ -97,11 +97,21 @@ if __name__ == "__main__":
         if not q:
             continue
         if q.lower().endswith(".wav"):
-            heard, reply, hits = voice_answer(session, q)
+            try:
+                heard, reply, hits = voice_answer(session, q)
+            except Exception:
+                log.exception("voice turn failed")
+                print("Response: Sorry, I'm having trouble right now. Please try again in a moment.\n")
+                continue
             print(f"Heard: {heard}\nResponse: {reply}")
             print("Sources:", ", ".join(sorted({h["source"] for h in hits})) or "none", "\n")
             os.startfile("reply.wav")
             continue
-        reply, hits = session.turn(q) 
+        try:
+            reply, hits = session.turn(q)
+        except Exception:
+            log.exception("turn failed on every model")
+            print("Response: Sorry, I'm having trouble right now. Please try again in a moment.\n")
+            continue
         print(f"Response: {reply}")
         log.info("Sources: %s", ", ".join(sorted({h["source"] for h in hits})) or "none")
