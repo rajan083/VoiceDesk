@@ -22,26 +22,9 @@ def send(channel, to, body):
         if channel == "outbox":
             with open("outbox.jsonl", "a", encoding="utf-8") as f:
                 f.write(json.dumps({"ts": time.strftime("%Y-%m-%d %H:%M:%S"), "to": to, "body": body},ensure_ascii=False) + "\n")
-                
         elif channel == "telegram":
             _post(f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage",
                   urllib.parse.urlencode({"chat_id": to, "text": body}).encode())
-            
-        elif channel == "email":
-            m = EmailMessage()
-            m["From"], m["To"], m["Subject"] = os.environ["SMTP_USER"], to, "Message from VoiceDesk"
-            m.set_content(body)
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=10) as s:
-                s.login(os.environ["SMTP_USER"], os.environ["SMTP_APP_PASSWORD"])
-                s.send_message(m)
-                
-        elif channel == "whatsapp":      # Meta Cloud API; free-form text only inside the 24h window
-            _post(f"https://graph.facebook.com/{os.environ.get('WA_GRAPH_VERSION', 'v26.0')}"
-                  f"/{os.environ['WA_PHONE_NUMBER_ID']}/messages",
-                  json.dumps({"messaging_product": "whatsapp", "to": to, "type": "text",
-                              "text": {"body": body}}).encode(),
-                  {"Authorization": "Bearer " + os.environ["WA_TOKEN"], "Content-Type": "application/json"})
-            
         else:
             return {"ok": False, "error": "unknown_channel"}
         return {"ok": True}
